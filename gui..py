@@ -4,20 +4,68 @@ import os
 import platform
 import json
 import signal
+import webbrowser
+import requests
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton,
     QVBoxLayout, QGridLayout, QLabel, QMessageBox, QFrame, QHBoxLayout,
     QDialog, QDialogButtonBox, QCheckBox, QLineEdit, QFileDialog
 )
-from PySide6.QtGui import QFont, QCursor, QColor, QPainter, QBrush, QIcon
+from PySide6.QtGui import QFont, QCursor, QColor, QPainter, QBrush, QIcon, QResizeEvent
 from PySide6.QtCore import (
     Qt, QTimer, QObject, Signal, QThread, QPropertyAnimation, QPoint, QEasingCurve,
     Property
 )
 
+# --- NEW: Application Version Constant ---
+# Change this value for each new release.
+APP_VERSION = "1.2"
+
+# --- PYINSTALLER HELPER FUNCTION ---
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        # _MEIPASS is not defined, so we are running in a normal Python environment
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+
+# --- Update Checker Worker ---
+class UpdateChecker(QObject):
+    update_available = Signal(str, str)
+
+    def __init__(self, current_version):
+        super().__init__()
+        self.current_version = current_version
+        self.api_url = "https://api.github.com/repos/cfopuser/mtk-root-control/releases/latest"
+
+    def run(self):
+        try:
+            response = requests.get(self.api_url, timeout=5)
+            response.raise_for_status()
+            
+            latest_release = response.json()
+            latest_version = latest_release.get("tag_name", "0.0.0")
+            download_url = latest_release.get("html_url", "")
+
+            latest_v = latest_version.lstrip('v')
+            current_v = self.current_version.lstrip('v')
+
+            if tuple(map(int, latest_v.split('.'))) > tuple(map(int, current_v.split('.'))):
+                print(f"Update found: {latest_version}")
+                self.update_available.emit(latest_version, download_url)
+
+        except requests.exceptions.RequestException as e:
+            print(f"Could not check for updates: {e}")
+        except Exception as e:
+            print(f"An error occurred during update check: {e}")
 
 # --- Configuration File Handling ---
-# (No changes in this section)
 CONFIG_FILE = 'app_config.json'
 
 def load_config():
@@ -36,7 +84,7 @@ def save_config(config):
         json.dump(config, f, indent=4)
 
 
-# --- Worker for Running Commands (MODIFIED) ---
+# --- Worker for Running Commands ---
 class CommandRunner(QObject):
     finished = Signal(int, str)
     error = Signal(str, str)
@@ -44,10 +92,10 @@ class CommandRunner(QObject):
     def __init__(self):
         super().__init__()
         self.process = None
-        self._is_stopping = False # Flag to indicate intentional stop
+        self._is_stopping = False
 
     def run_command(self, command, title):
-        self._is_stopping = False # Reset flag for new command
+        self._is_stopping = False
         try:
             popen_kwargs = {
                 'shell': True,
@@ -67,7 +115,6 @@ class CommandRunner(QObject):
             stdout, stderr = self.process.communicate()
             return_code = self.process.returncode
 
-            # If process was stopped by user, emit special signal and exit cleanly
             if self._is_stopping:
                 self.finished.emit(-9, "user_stopped")
                 return
@@ -79,10 +126,8 @@ class CommandRunner(QObject):
             self.finished.emit(return_code, command)
 
         except Exception as e:
-            # If an error occurs, only report it if we weren't trying to stop it
             if not self._is_stopping:
                 self.error.emit(f"An unexpected error occurred: {e}", command)
-            # Always emit a finished signal to allow UI cleanup
             self.finished.emit(-1, command)
         finally:
             self.process = None
@@ -90,7 +135,7 @@ class CommandRunner(QObject):
     def stop_command(self):
         if self.process and self.process.poll() is None:
             print("Stop command requested by user.")
-            self._is_stopping = True # Set flag before killing
+            self._is_stopping = True
             pid = self.process.pid
             try:
                 if os.name == 'nt':
@@ -102,11 +147,9 @@ class CommandRunner(QObject):
                     os.killpg(os.getpgid(pid), signal.SIGKILL)
             except (subprocess.CalledProcessError, OSError) as e:
                 print(f"Could not stop process {pid}. It might have already finished. Error: {e}")
-            # Do not emit signal here; let run_command handle it
 
 
-# --- Custom Dialog for Nicer, Quieter Popups ---
-# (No changes in this section)
+# --- Custom Dialogs ---
 class CustomDialog(QDialog):
     def __init__(self, parent, title, text):
         super().__init__(parent)
@@ -145,14 +188,69 @@ class CustomDialog(QDialog):
         button_box.setCenterButtons(True)
         layout.addWidget(button_box)
 
+class UpdateDialog(QDialog):
+    def __init__(self, parent, new_version, download_url):
+        super().__init__(parent)
+        self.setWindowTitle("קיים עדכון")
+        self.download_url = download_url
+        self.setModal(True)
+        self.setMinimumWidth(450)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #262626; border: 1px solid #00ff7f;
+                border-radius: 15px; font-family: 'Consolas', 'Courier New', monospace;
+            }
+            QLabel { color: #f0f0f0; font-size: 16px; }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(25, 25, 25, 25)
+        layout.setSpacing(20)
+
+        message = f"גרסה חדשה ({new_version}) זמינה!\nמומלץ לעדכן לקבלת התיקונים והתכונות האחרונות."
+        self.message_label = QLabel(message)
+        self.message_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.message_label)
+
+        button_box = QDialogButtonBox()
+        download_button = QPushButton("הורדה")
+        later_button = QPushButton("אחר כך")
+
+        download_button.setCursor(QCursor(Qt.PointingHandCursor))
+        later_button.setCursor(QCursor(Qt.PointingHandCursor))
+
+        download_button.setStyleSheet("""
+            QPushButton {
+                background-color: #00ff7f; color: #1a1a1a; font-size: 14px;
+                font-weight: bold; padding: 10px 25px; border-radius: 8px; min-width: 90px;
+            }
+            QPushButton:hover { background-color: #00cc66; }
+        """)
+        later_button.setStyleSheet("""
+            QPushButton {
+                background-color: #555; color: #f0f0f0; font-size: 14px;
+                font-weight: bold; padding: 10px 25px; border-radius: 8px; min-width: 90px;
+            }
+            QPushButton:hover { background-color: #666; }
+        """)
+
+        button_box.addButton(download_button, QDialogButtonBox.AcceptRole)
+        button_box.addButton(later_button, QDialogButtonBox.RejectRole)
+        button_box.accepted.connect(self.download)
+        button_box.rejected.connect(self.reject)
+        button_box.setCenterButtons(True)
+        layout.addWidget(button_box)
+
+    def download(self):
+        webbrowser.open(self.download_url)
+        self.accept()
 
 # --- WelcomeWindow Class ---
-# (No changes in this section)
 class WelcomeWindow(QMainWindow):
     def __init__(self, main_tool_window):
         super().__init__()
         self.main_tool_window = main_tool_window
-        self.setWindowIcon(QIcon('mtk_icon.ico'))
+        self.setWindowIcon(QIcon(resource_path('mtk_icon.ico')))
         self.init_ui()
 
     def init_ui(self):
@@ -222,15 +320,18 @@ class WelcomeWindow(QMainWindow):
     def run_driver_installation(self):
         try:
             CustomDialog(self, "התקנת דרייבר MTK", "חלון התקנת דרייבר MTK יפתח כעת. אנא עקוב אחר ההוראות.").exec()
-            self.run_command('mtk.exe', "התקנת דרייבר MTK")
+            mtk_exe_path = resource_path("mtk.exe")
+            self.run_command(f'"{mtk_exe_path}"', "התקנת דרייבר MTK")
 
             driver_path = ''
             if platform.machine().endswith('64'):
                 CustomDialog(self, 'התקנת דרייבר Fastboot', 'חלון התקנת דרייבר Fastboot יפתח כעת. אנא עקוב אחר ההוראות.').exec()
-                driver_path = r'driver\DPInst_x64 /f'
+                driver_exe = resource_path(os.path.join("driver", "DPInst_x64"))
+                driver_path = f'"{driver_exe}" /f'
             else:
                 CustomDialog(self, 'התקנת דרייבר Fastboot', 'חלון התקנת דרייבר Fastboot יפתח כעת. אנא עקוב אחר ההוראות.').exec()
-                driver_path = r'driver\DPInst_x86 /f'
+                driver_exe = resource_path(os.path.join("driver", "DPInst_x86"))
+                driver_path = f'"{driver_exe}" /f'
 
             self.run_command(driver_path, "התקנת דרייבר Fastboot")
 
@@ -249,7 +350,8 @@ class WelcomeWindow(QMainWindow):
 
     def run_command(self, command, title):
         try:
-            subprocess.run(command, shell=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            # Using creationflags to hide console window on Windows
+            subprocess.run(command, shell=True, check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         except FileNotFoundError:
             CustomDialog(self, "קובץ לא נמצא", f"הפקודה עבור '{title}' נכשלה.\nודא שהקובץ הנדרש קיים בתיקייה הנכונה.").exec()
             raise
@@ -266,69 +368,69 @@ class WelcomeWindow(QMainWindow):
         self.close()
 
 # --- Animated Toggle Switch Widget ---
-# (No changes in this section)
 class AnimatedToggleSwitch(QCheckBox):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setCursor(QCursor(Qt.PointingHandCursor))
-        
+
         self._on_color = QColor("#00ff7f")
         self._off_color = QColor("#555")
         self._thumb_color = QColor("#f0f0f0")
-        
+
         self.setFixedSize(60, 28)
         self._thumb_radius = 10
         self._padding = 4
+        
+        self._thumb_pos = self._calculate_thumb_pos()
 
-        self.animation = QPropertyAnimation(self, b"thumb_position", self)
+        self.animation = QPropertyAnimation(self, b"thumb_pos", self)
         self.animation.setDuration(200)
         self.animation.setEasingCurve(QEasingCurve.InOutCubic)
-        
+
         self.stateChanged.connect(self._start_animation)
 
-    @Property(QPoint)
-    def thumb_position(self):
-        x = self._padding + self._thumb_radius
+    def _calculate_thumb_pos(self) -> QPoint:
         if self.isChecked():
+            x = self._padding + self._thumb_radius
+        else:
             x = self.width() - self._padding - self._thumb_radius
         return QPoint(x, self.height() // 2)
 
-    @thumb_position.setter
-    def thumb_position(self, pos):
+    @Property(QPoint)
+    def thumb_pos(self) -> QPoint:
+        return self._thumb_pos
+
+    @thumb_pos.setter
+    def thumb_pos(self, pos: QPoint):
+        self._thumb_pos = pos
         self.update()
 
     def _start_animation(self, state):
         self.animation.stop()
-        start_x = self.thumb_position.x()
-        
-        if state == Qt.Checked:
-            end_x = self.width() - self._padding - self._thumb_radius
-        else:
-            end_x = self._padding + self._thumb_radius
-        
-        self.animation.setStartValue(QPoint(start_x, self.height() // 2))
-        self.animation.setEndValue(QPoint(end_x, self.height() // 2))
+        self.animation.setStartValue(self.thumb_pos)
+        self.animation.setEndValue(self._calculate_thumb_pos())
         self.animation.start()
-        
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
 
-        current_pos = self.animation.currentValue() or self.thumb_position
-        
-        track_color = self._off_color
-        if self.isChecked():
-            track_color = self._on_color
-        
+        track_color = self._on_color if self.isChecked() else self._off_color
+
         painter.setBrush(track_color)
         painter.drawRoundedRect(self.rect(), self.height() / 2, self.height() / 2)
-        
+
         painter.setBrush(self._thumb_color)
-        painter.drawEllipse(current_pos, self._thumb_radius, self._thumb_radius)
+        painter.drawEllipse(self.thumb_pos, self._thumb_radius, self._thumb_radius)
 
     def hitButton(self, pos: QPoint) -> bool:
         return self.contentsRect().contains(pos)
+    
+    def resizeEvent(self, event: QResizeEvent):
+        super().resizeEvent(event)
+        self._thumb_pos = self._calculate_thumb_pos()
+
 
 class ModernMTKTool(QMainWindow):
     request_command = Signal(str, str)
@@ -341,14 +443,20 @@ class ModernMTKTool(QMainWindow):
         self.command_chain = []
         self.expert_mode_enabled = False
 
-        self.boot_img_path = os.path.join("boot & recovery", "boot.img")
-        self.recovery_img_path = os.path.join("boot & recovery", "recovery.img")
+        # Paths to executables, defined once
+        self.adb_exe = resource_path("adb.exe")
+        self.fastboot_exe = resource_path("fastboot.exe")
+
+        # Set default paths for bundled images
+        self.boot_img_path = resource_path(os.path.join("boot & recovery", "boot.img"))
+        self.recovery_img_path = resource_path(os.path.join("boot & recovery", "recovery.img"))
         
-        self.setWindowIcon(QIcon('mtk_icon.ico'))
+        self.setWindowIcon(QIcon(resource_path('mtk_icon.ico')))
 
         self.init_ui()
         self.init_worker()
         self.start_device_monitor()
+        self.start_update_check()
 
     def init_worker(self):
         self.thread = QThread()
@@ -361,7 +469,7 @@ class ModernMTKTool(QMainWindow):
         self.thread.start()
 
     def init_ui(self):
-        self.setWindowTitle("כלי רוט למכשירי MTK")
+        self.setWindowTitle(f"כלי רוט למכשירי MTK (v{APP_VERSION})")
         self.setMinimumSize(900, 700)
         self.resize(1100, 750)
         self.setStyleSheet("background-color: #1a1a1a;")
@@ -427,10 +535,28 @@ class ModernMTKTool(QMainWindow):
         expert_layout.addStretch()
         main_layout.addLayout(expert_layout)
 
+        footer_layout = QHBoxLayout()
+        self.update_label = QPushButton("קיים עדכון חדש!")
+        self.update_label.setCursor(QCursor(Qt.PointingHandCursor))
+        self.update_label.setStyleSheet("""
+            QPushButton {
+                background-color: transparent; color: #00aaff;
+                font-size: 14px; border: none; padding: 5px;
+                font-weight: bold;
+            }
+            QPushButton:hover { text-decoration: underline; }
+        """)
+        self.update_label.hide()
+
         footer_label = QLabel("פותח על ידי @cfopuser | לחץ 'Esc' ליציאה")
         footer_label.setAlignment(Qt.AlignCenter)
         footer_label.setStyleSheet("color: #555; font-size: 14px; padding-top: 10px;")
-        main_layout.addWidget(footer_label)
+        
+        footer_layout.addWidget(self.update_label)
+        footer_layout.addStretch()
+        footer_layout.addWidget(footer_label)
+        footer_layout.addStretch()
+        main_layout.addLayout(footer_layout)
 
         self.update_button_states()
 
@@ -593,27 +719,22 @@ class ModernMTKTool(QMainWindow):
     def on_command_error(self, message, command):
         QMessageBox.critical(self, "שגיאה", message)
     
-    # --- MODIFIED: Refined logic to handle user stops silently ---
     def on_command_finished(self, return_code, command):
         print(f"Command '{command}' finished with code {return_code}.")
         
         button_that_finished = self.active_button
 
-        # Only process command chain and success messages on successful, non-user-stopped commands
         if return_code == 0 and command != "user_stopped":
             if self.command_chain:
                 next_step = self.command_chain.pop(0)
                 next_step = (*next_step[:2], button_that_finished, *next_step[3:])
                 QTimer.singleShot(500, lambda: self.execute_command(*next_step))
-                # If we are starting a new command, don't clean up the UI yet
                 return
 
             success_message = button_that_finished.property("success_message") if button_that_finished else ""
             if success_message:
                 QMessageBox.information(self, "הצלחה", f"{success_message}")
         
-        # This cleanup block now runs for all finish conditions:
-        # success, failure, or user_stopped.
         self.set_ui_for_running_command(False)
         self.update_button_states()
 
@@ -642,32 +763,39 @@ class ModernMTKTool(QMainWindow):
 
     def unlock_bootloader(self, button):
         self.command_chain = [
-            ('fastboot flashing unlock', "פתיחת Bootloader", "ה-Bootloader נפתח בהצלחה.")
+            (f'"{self.fastboot_exe}" flashing unlock', "פתיחת Bootloader", "ה-Bootloader נפתח בהצלחה.")
         ]
-        self.execute_command('adb reboot bootloader', "כניסה ל-Bootloader", button)
+        self.execute_command(f'"{self.adb_exe}" reboot bootloader', "כניסה ל-Bootloader", button)
 
     def flash_boot(self, button):
         self.command_chain = [
-            (f'fastboot flash boot "{self.boot_img_path}"', "צריבת Boot", "צריבת קובץ boot הושלמה."),
-            ('fastboot reboot', "איתחול המכשיר", "המכשיר אותחל בהצלחה.")
+            (f'"{self.fastboot_exe}" flash boot "{self.boot_img_path}"', "צריבת Boot", "צריבת קובץ boot הושלמה."),
+            (f'"{self.fastboot_exe}" reboot', "איתחול המכשיר", "המכשיר אותחל בהצלחה.")
         ]
-        self.execute_command('fastboot --disable-verity --disable-verification flash vbmeta vbmeta.img', "צריבת VBMeta", button)
+        vbmeta_path = resource_path("vbmeta.img")
+        command = f'"{self.fastboot_exe}" --disable-verity --disable-verification flash vbmeta "{vbmeta_path}"'
+        self.execute_command(command, "צריבת VBMeta", button)
 
     def flash_recovery(self, button):
         self.command_chain = [
-            (f'fastboot flash recovery "{self.recovery_img_path}"', "צריבת Recovery", "צריבת קובץ recovery הושלמה."),
-            ('fastboot reboot', "איתחול המכשיר", "המכשיר אותחל בהצלחה.")
+            (f'"{self.fastboot_exe}" flash recovery "{self.recovery_img_path}"', "צריבת Recovery", "צריבת קובץ recovery הושלמה."),
+            (f'"{self.fastboot_exe}" reboot', "איתחול המכשיר", "המכשיר אותחל בהצלחה.")
         ]
-        self.execute_command('fastboot --disable-verity --disable-verification flash vbmeta vbmeta.img', "צריבת VBMeta", button)
+        vbmeta_path = resource_path("vbmeta.img")
+        command = f'"{self.fastboot_exe}" --disable-verity --disable-verification flash vbmeta "{vbmeta_path}"'
+        self.execute_command(command, "צריבת VBMeta", button)
 
     def reboot_device(self, button):
-        self.execute_command('fastboot reboot', "איתחול המכשיר", button, "המכשיר מאתחל כעת.")
+        self.execute_command(f'"{self.fastboot_exe}" reboot', "איתחול המכשיר", button, "המכשיר מאתחל כעת.")
 
     def on_expert_mode_toggled(self, checked):
         self.expert_mode_enabled = checked
         self.update_button_states()
 
     def update_button_states(self):
+        if self.active_button is not None:
+            return
+
         if self.expert_mode_enabled:
             for button in self.action_buttons.values():
                 button.setEnabled(True)
@@ -690,13 +818,24 @@ class ModernMTKTool(QMainWindow):
 
     def run_adb_command(self, command, capture=True):
         try:
-            result = subprocess.run(command, shell=True, capture_output=capture, text=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW, encoding='utf-8')
+            popen_kwargs = {
+                'shell': True,
+                'capture_output': capture,
+                'text': True,
+                'check': True,
+                'encoding': 'utf-8',
+                'errors': 'ignore'
+            }
+            if os.name == 'nt':
+                popen_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            
+            result = subprocess.run(command, **popen_kwargs)
             return result.stdout.strip() if capture else ""
         except (subprocess.CalledProcessError, FileNotFoundError):
             return None 
 
     def update_device_info(self):
-        fastboot_devices = self.run_adb_command("fastboot devices")
+        fastboot_devices = self.run_adb_command(f'"{self.fastboot_exe}" devices')
         if fastboot_devices is not None and fastboot_devices:
             self.device_status_label.setText("Fastboot Mode")
             self.device_status_label.setStyleSheet("color: #00aaff; font-size: 18px; font-weight: bold; border: none;")
@@ -706,7 +845,7 @@ class ModernMTKTool(QMainWindow):
             self.update_button_states()
             return
 
-        adb_devices = self.run_adb_command("adb devices")
+        adb_devices = self.run_adb_command(f'"{self.adb_exe}" devices')
         if adb_devices is None or "List of devices attached" not in adb_devices or len(adb_devices.splitlines()) < 2:
             self.device_status_label.setText("לא מחובר")
             self.device_status_label.setStyleSheet("color: #ff4747; font-size: 18px; font-weight: bold; border: none;")
@@ -734,14 +873,35 @@ class ModernMTKTool(QMainWindow):
         self.device_status_label.setStyleSheet(f"color: {status_color}; font-size: 18px; font-weight: bold; border: none;")
 
         if "device" in device_line:
-            model = self.run_adb_command("adb shell getprop ro.product.model") or "לא זמין"
-            cpu = self.run_adb_command("adb shell getprop ro.board.platform") or "לא זמין"
-            android_ver = self.run_adb_command("adb shell getprop ro.build.version.release") or "לא זמין"
+            model = self.run_adb_command(f'"{self.adb_exe}" shell getprop ro.product.model') or "לא זמין"
+            cpu = self.run_adb_command(f'"{self.adb_exe}" shell getprop ro.board.platform') or "לא זמין"
+            android_ver = self.run_adb_command(f'"{self.adb_exe}" shell getprop ro.build.version.release') or "לא זמין"
             self.device_model_label.setText(model)
             self.device_cpu_label.setText(cpu)
             self.device_android_label.setText(android_ver)
         
         self.update_button_states()
+
+    def start_update_check(self):
+        self.update_thread = QThread()
+        self.update_worker = UpdateChecker(APP_VERSION)
+        self.update_worker.moveToThread(self.update_thread)
+        
+        self.update_worker.update_available.connect(self.handle_update_check)
+        self.update_thread.started.connect(self.update_worker.run)
+        self.update_thread.finished.connect(self.update_thread.deleteLater)
+        
+        self.update_thread.start()
+
+    def handle_update_check(self, new_version, download_url):
+        self.latest_version_tag = new_version
+        self.download_url = download_url
+        self.update_label.show()
+        self.update_label.clicked.connect(self.show_update_dialog)
+
+    def show_update_dialog(self):
+        dialog = UpdateDialog(self, self.latest_version_tag, self.download_url)
+        dialog.exec()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
@@ -749,6 +909,10 @@ class ModernMTKTool(QMainWindow):
 
     def closeEvent(self, event):
         print("Closing application...")
+        if hasattr(self, 'update_thread') and self.update_thread.isRunning():
+            self.update_thread.quit()
+            self.update_thread.wait()
+        
         if self.thread.isRunning():
             self.worker.stop_command()
             self.thread.quit()
