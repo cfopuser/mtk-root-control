@@ -20,7 +20,7 @@ from PySide6.QtCore import (
 
 # --- NEW: Application Version Constant ---
 # Change this value for each new release.
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 
 # --- PYINSTALLER HELPER FUNCTION ---
 def resource_path(relative_path):
@@ -185,6 +185,60 @@ class CustomDialog(QDialog):
         """)
         button_box.addButton(ok_button, QDialogButtonBox.AcceptRole)
         button_box.accepted.connect(self.accept)
+        button_box.setCenterButtons(True)
+        layout.addWidget(button_box)
+
+# --- NEW: Custom Confirmation Dialog for Risky Actions ---
+class ConfirmationDialog(QDialog):
+    def __init__(self, parent, title, text):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(450)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #262626; border: 1px solid #00ff7f;
+                border-radius: 15px; font-family: 'Consolas', 'Courier New', monospace;
+            }
+            QLabel { color: #f0f0f0; font-size: 16px; }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(25, 25, 25, 25)
+        layout.setSpacing(20)
+
+        self.message_label = QLabel(text)
+        self.message_label.setWordWrap(True)
+        self.message_label.setTextFormat(Qt.RichText)
+        self.message_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(self.message_label)
+
+        button_box = QDialogButtonBox()
+        
+        proceed_button = QPushButton("ביטול")
+        proceed_button.setCursor(QCursor(Qt.PointingHandCursor))
+        proceed_button.setStyleSheet("""
+            QPushButton {
+                background-color: #ff4747; color: #1a1a1a; font-size: 14px;
+                font-weight: bold; padding: 10px 25px; border-radius: 8px; min-width: 90px;
+            }
+            QPushButton:hover { background-color: #d63b3b; }
+        """)
+        
+        cancel_button = QPushButton("המשך")
+        cancel_button.setCursor(QCursor(Qt.PointingHandCursor))
+        cancel_button.setStyleSheet("""
+            QPushButton {
+                background-color: #00ff7f; color: #1a1a1a; font-size: 14px;
+                font-weight: bold; padding: 10px 25px; border-radius: 8px; min-width: 90px;
+            }
+            QPushButton:hover { background-color: #00cc66; }
+        """)
+
+        button_box.addButton(proceed_button, QDialogButtonBox.AcceptRole)
+        button_box.addButton(cancel_button, QDialogButtonBox.RejectRole)
+        button_box.accepted.connect(self.reject)
+        button_box.rejected.connect(self.accept)
         button_box.setCenterButtons(True)
         layout.addWidget(button_box)
 
@@ -447,9 +501,9 @@ class ModernMTKTool(QMainWindow):
         self.adb_exe = resource_path("adb.exe")
         self.fastboot_exe = resource_path("fastboot.exe")
 
-        # Set default paths for bundled images
-        self.boot_img_path = resource_path(os.path.join("boot & recovery", "boot.img"))
-        self.recovery_img_path = resource_path(os.path.join("boot & recovery", "recovery.img"))
+        # Paths for user-selected images, initialized to empty
+        self.boot_img_path = ""
+        self.recovery_img_path = ""
         
         self.setWindowIcon(QIcon(resource_path('mtk_icon.ico')))
 
@@ -589,6 +643,7 @@ class ModernMTKTool(QMainWindow):
 
             path_edit = QLineEdit()
             path_edit.setReadOnly(True)
+            path_edit.setPlaceholderText("נא לבחור קובץ...")
             path_edit.setStyleSheet("""
                 QLineEdit {
                     background-color: #1a1a1a; color: #f0f0f0;
@@ -597,8 +652,6 @@ class ModernMTKTool(QMainWindow):
                 }
             """)
             
-            initial_path = self.boot_img_path if card_id == "flash_boot" else self.recovery_img_path
-            path_edit.setText(initial_path)
             self.path_edits[card_id] = path_edit
 
             browse_button = QPushButton("...")
@@ -611,7 +664,7 @@ class ModernMTKTool(QMainWindow):
                 }
                 QPushButton:hover { background-color: #666; }
             """)
-            browse_button.clicked.connect(lambda: self.select_file(card_id))
+            browse_button.clicked.connect(lambda: self.prompt_for_file_selection(card_id))
             
             file_chooser_layout.addWidget(path_edit)
             file_chooser_layout.addWidget(browse_button)
@@ -653,34 +706,32 @@ class ModernMTKTool(QMainWindow):
         
         card_layout.addStretch()
         return card
-    
-    def select_file(self, file_type):
-        expected_filename = ""
-        if file_type == "flash_boot":
-            expected_filename = "boot.img"
-        elif file_type == "flash_recovery":
-            expected_filename = "recovery.img"
-        else:
-            return
 
+    def prompt_for_file_selection(self, file_type):
+        warning_text = (
+            "<b>אזהרה:</b> צריבת קובץ שגוי או פגום עלולה לגרום נזק בלתי הפיך למכשיר (בריק).<br><br>"
+            "ודא שהקובץ שאתה עומד לבחור מיועד <u>בדיוק</u> לדגם המכשיר ולגרסת התוכנה שלך.<br><br>"
+            "<b>המשך על אחריותך בלבד.</b>"
+        )
+        dialog = ConfirmationDialog(self, "אזהרת בטיחות", warning_text)
+        
+        if dialog.exec() == QDialog.Accepted:
+            self.select_file(file_type)
+
+    def select_file(self, file_type):
         dialog = QFileDialog(self)
         dialog.setNameFilter("Image files (*.img)")
         dialog.setFileMode(QFileDialog.ExistingFile)
         
         if dialog.exec():
             selected_file = dialog.selectedFiles()[0]
-            filename = os.path.basename(selected_file)
 
-            if filename.lower() == expected_filename:
-                if file_type == "flash_boot":
-                    self.boot_img_path = selected_file
-                else: # flash_recovery
-                    self.recovery_img_path = selected_file
-                
-                self.path_edits[file_type].setText(selected_file)
-            else:
-                error_msg = f"שגיאה: יש לבחור קובץ בשם '{expected_filename}'."
-                CustomDialog(self, "קובץ לא תקין", error_msg).exec()
+            if file_type == "flash_boot":
+                self.boot_img_path = selected_file
+            elif file_type == "flash_recovery":
+                self.recovery_img_path = selected_file
+            
+            self.path_edits[file_type].setText(selected_file)
 
     def set_ui_for_running_command(self, is_running, active_button=None):
         for btn in self.action_buttons.values():
@@ -768,6 +819,10 @@ class ModernMTKTool(QMainWindow):
         self.execute_command(f'"{self.adb_exe}" reboot bootloader', "כניסה ל-Bootloader", button)
 
     def flash_boot(self, button):
+        if not self.boot_img_path:
+            CustomDialog(self, "קובץ חסר", "יש לבחור קובץ boot.img לפני תחילת התהליך.").exec()
+            return
+
         self.command_chain = [
             (f'"{self.fastboot_exe}" flash boot "{self.boot_img_path}"', "צריבת Boot", "צריבת קובץ boot הושלמה."),
             (f'"{self.fastboot_exe}" reboot', "איתחול המכשיר", "המכשיר אותחל בהצלחה.")
@@ -777,6 +832,10 @@ class ModernMTKTool(QMainWindow):
         self.execute_command(command, "צריבת VBMeta", button)
 
     def flash_recovery(self, button):
+        if not self.recovery_img_path:
+            CustomDialog(self, "קובץ חסר", "יש לבחור קובץ recovery.img לפני תחילת התהליך.").exec()
+            return
+        
         self.command_chain = [
             (f'"{self.fastboot_exe}" flash recovery "{self.recovery_img_path}"', "צריבת Recovery", "צריבת קובץ recovery הושלמה."),
             (f'"{self.fastboot_exe}" reboot', "איתחול המכשיר", "המכשיר אותחל בהצלחה.")
