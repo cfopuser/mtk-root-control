@@ -602,7 +602,9 @@ class ModernMTKTool(QMainWindow):
         """)
         self.update_label.hide()
 
-        footer_label = QLabel("פותח על ידי @cfopuser | לחץ 'Esc' ליציאה")
+        about_text = 'פותח על ידי <a href="https://mitmachim.top/user/cfopuser" style="color: #555; text-decoration: none;">@שלמה רביב</a> ' + "| לחץ 'Esc' ליציאה"
+        footer_label = QLabel(about_text)
+        footer_label.setOpenExternalLinks(True)
         footer_label.setAlignment(Qt.AlignCenter)
         footer_label.setStyleSheet("color: #555; font-size: 14px; padding-top: 10px;")
         
